@@ -3,6 +3,7 @@
 library(MASS)
 library(DAAG)
 library(carData)
+libarary(dplyr)
 
 # Задание 1:
 # посмотрим, что там лежит
