@@ -1,0 +1,219 @@
+---
+title: "Отчет по проектной работе №1: Обработка данных моллюсков"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+В ходе работы будут использованы библиотеки **dplyr** и **ggplot2**.
+
+```{r, echo=TRUE, include=FALSE, warning=FALSE}
+
+check.packages <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+        install.packages(new.pkg, dependencies = TRUE)
+    sapply(pkg, require, character.only = TRUE)
+}
+packages<-c("ggplot2", "dplyr")
+check.packages(packages)
+```
+
+### 1. Единая таблица
+
+Напишем функцию **load_data()**, которая на вход принимает путь к папке, в которой лежат *.csv* файлы, а возвращает датафрейм объединенных таблиц
+```{r}
+load_data <- function(path) { 
+  files <- dir(path, pattern = '*.csv', full.names = TRUE)
+  tables <- lapply(files, read.csv)
+  do.call(rbind, tables)
+}
+```
+Применим её к нашим данным:
+
+```{r}
+data <- load_data("./Data")
+```
+
+### 2. Фильтрация
+
+Посмотрим на данные:
+```{r}
+str(data)
+```
+
+Не очень хорошо, что число колец и длина -- номинативные переменные, когда они должны быть числовыми. Исправим это. Также, название колонки для пола не совсем корректно. Это тоже можно исправить.
+
+```{r, warning=FALSE}
+data <- data %>% mutate(Rings = as.numeric(Rings), Length = as.numeric(Length))
+colnames(data)[2] <- "Sex"
+```
+
+Ну и конечно, нужно избавиться от NA. Один из наиболее употребимых подходов -- замена всех NA на средние значения:
+
+```{r}
+replace_na_to_mean <- function(x){
+  ifelse(is.na(x), mean(x, na.rm = T), x)
+}
+```
+
+Но мы им пользоваться не будем. Заметим, что в нашем случае, количество строк с NA много меньше количества наблюдений, поэтому дабы не портить статистику, лучше наблюдения с NA вычеркнуть из данных.
+
+```{r}
+row.has.na <- apply(data, 1, function(x){any(is.na(x))})
+data_without_NA <- data[!row.has.na,]
+```
+
+Также заменим неправильные обозначения для пола моллюска:
+
+```{r}
+data_without_NA[data_without_NA$Sex == "male", ]$Sex <- '1'
+data_without_NA[data_without_NA$Sex == "one", ]$Sex <- '1'
+data_without_NA[data_without_NA$Sex == "three", ]$Sex <- '3'
+```
+
+### 3. Среднее значение и стандартное отклонение переменной Length для моллюсков разного пола.
+
+```{r}
+data_without_NA %>% group_by(Sex) %>% summarise(mean = mean(Length), sd = sd(Length))
+```
+
+### 4. Процент моллюсков, для которых значение переменной Height не превышает 0.165.
+
+```{r}
+100 * nrow(data_without_NA[data_without_NA$Height <= 0.165, ]) / nrow(data_without_NA)
+```
+
+### 5. Значение переменной Length, которое выше чем у 92% от всех наблюдений
+
+```{r}
+quantile(data_without_NA$Length, probs = c(0.92))
+```
+
+### 6. Значения переменной Length после её стандартизации.
+
+```{r}
+Lenght_z_scores <- (data_without_NA$Length - mean(data_without_NA$Length)) / sd(data_without_NA$Length)
+```
+
+### 7. Сравнение между собой диаметров моллюсков с числом колец 5 и 15.
+
+Построим график плотностей распределений для моллюсков с 5 кольцами и 15 кольцами. 
+```{r}
+rings_5 <- data_without_NA[data_without_NA$Rings == 5, ]
+rings_15 <- data_without_NA[data_without_NA$Rings == 15, ]
+rings_5_15 <- rbind(rings_5, rings_15)
+
+ggplot(rings_5_15, aes(x = rings_5_15$Diameter, fill = factor(Rings))) +
+  geom_density(alpha = 0.5)+
+  xlab("Диаметр")+
+  ylab("Количество")+
+  scale_fill_discrete(name="Число колец")+
+  ggtitle("График плотностей распределения по кольцам")
+  
+```
+
+Смотря на графики, можно выдвинуть две гипотезы: H0 -- математические ожидания одинаковые или H1 -- математические ожидания различаются для моллюсков с количеством колец 5 и 15.
+Чтобы проводить тест, посмотрим, нормально ли распределены данные с помощью теста Шапиро-Вилка:
+
+```{r}
+shapiro.test(data_without_NA$Diameter)
+```
+
+Судя по результату, данные имеют не нормальное распределение, поэтому проверять свои гипотезы будем с помощью теста Манна-Уитни.
+
+```{r}
+wilcox.test(Diameter ~ Rings, data = data_without_NA, subset = Rings %in% c(5, 15))
+```
+
+Отвергаем гипотезу о равенстве средних для выборок с 5ю кольцами и 15ю (p-value < `r wilcox.test(Diameter ~ Rings, data = data_without_NA, subset = Rings %in% c(5, 15))$p.value`).
+
+### 8. Корреляция Diameter и Whole_weight.
+
+Посмотрим, как соотносятся данные переменные:
+
+```{r}
+ggplot(data_without_NA, aes(x = Diameter, y = Whole_weight)) +
+  geom_point() +
+  xlab("Диаметр")+
+  ylab("Вес")+
+  ggtitle("Корреляция диаметра моллюска и его веса")
+```
+
+Во-первых, мы видим параболу, что означает корреляцию степенной зависимости диаметра и значения веса всего моллюска. Логично, что объем растет по кубу от линейного размера, а диаметр -- это как раз линейный размер, а вес линейно зависит от объема. Таким образом, проверим гипотезу о корреляции между кубом от значения диаметра моллюска и его весом.
+
+```{r}
+cor.test(data_without_NA$Diameter, (data_without_NA$Whole_weight) ** (1/3))
+```
+
+с p-value около `r cor.test(data_without_NA$Diameter, (data_without_NA$Whole_weight) ** (1/3))$p.value` отвергаем H0-гипотезу о том, что они не скоррелированы. Нарисуем график:
+
+```{r}
+ggplot(data_without_NA, aes(x = Diameter, y = Whole_weight ** (1/3))) +
+  geom_point() +
+  xlab("Диаметр")+
+  ylab("Вес ** (1/3)")+
+  ggtitle("Корреляция куба диаметра моллюска и его веса")
+```
+
+### 9. Различия числа колец у особей разного возраста.
+
+Есть основания предполагать, что у малышей моллюсков колец будет меньше, чем у взрослых. Также возможно у мужских особей количество колец будет отличаться от оного у женских особей. Посмотрим на графики.
+
+```{r}
+ggplot(data_without_NA, aes(x = data_without_NA$Rings, col = factor(Sex, labels = c("мужчины", 'женщины', 'дети')))) +
+  geom_density()+
+  xlab("Кольца")+
+  ylab("Количество")+ 
+  labs(col = "Пол")+
+  ggtitle("График плотности распределения колец моллюсков")
+```
+
+Проверим данные на нормальность:
+
+```{r}
+shapiro.test(data_without_NA$Rings)
+```
+
+Данные не являются нормальными, поэтому проведем тесты Манна-Уитни:
+
+```{r}
+wilcox.test(Rings ~ Sex, data = data_without_NA, subset = Sex %in% c("1", "3"), alternative='greater')
+```
+
+Да, средние количества колец значимо различаются у детей и взрослых особей, у взрослых их больше.
+
+```{r}
+wilcox.test(Rings ~ Sex, data = data_without_NA, subset = Sex %in% c("1", "2"),  alternative="less")
+```
+
+Удивительно, что мужские и женщинские особи тоже отличаются по числу колец: притом значимо больше колец у женских по сравнению с мужскими (тест был односторонним).
+
+### 10. Корреляция веса ракушки и внутренности
+
+Гипотеза: вес ракушки и ее заполнения коррелирует. Посмотрим график. Рассчитаем тест.
+
+```{r}
+ggplot(data_without_NA, aes(x = Viscera_weight, y = Shell_weight)) +
+  geom_point()+
+  xlab("Вес внутренностей")+
+  ylab("Вес ракушки")+ 
+  ggtitle("График корреляции веса внутренностей и веса ракушки у моллюсков")
+```
+
+```{r, warning=FALSE}
+cor.test(data_without_NA$Viscera_weight, data_without_NA$Shell_weight, method = "spearm")
+```
+Судя по тесту, действительно, коррелируют.
+
+### 11. Построение множественной регрессионной модели для значения веса моллюска.
+
+Есть веские основания полагать, что общий вес моллюска складывается из веса раковины, веса внутренностей и веса почищенного моллюска. Построим линейную модель, описывающую "веса весов в общем весе" для моллюска, то есть какая часть от веса моллюска вносит бОльший вклад в общий вес моллюска. 
+
+```{r}
+weight.lm <- lm(Whole_weight ~ Shucked_weight+Viscera_weight+Shell_weight, data_without_NA)
+summary(weight.lm)
+```
+
+В построенной модели, во первых, мы видим интерсепт чуть меньше нуля (конечно, хотелось бы увидеть здесь ноль, но это тоже не так уж и плохо). Во-вторых, можем сделать вывод, что для линейного приближения, вес раковины вносит наибольший вклад в общий вес моллюска, но в целом незначительно больше. При этом, наша модель объясняет 99% дисперсии, что говорит о том, что такая модель имеет довольно хорошую предсказательную силу.
