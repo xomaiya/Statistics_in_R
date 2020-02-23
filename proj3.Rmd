@@ -1,0 +1,410 @@
+---
+title: "Уровень каких белков различается в мышиной модели синдрома Дауна"
+output:
+    html_document:
+      toc: true
+      toc_depth: 4
+      toc_float: true
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Библиотеки, которые необходимы для выполнения данного проекта **ggplot2**, **dplyr**, **lmtest**, **gdata**, **car**, **vegan**, **factoextra**, **pca3d**, **multcomp**, **gridExtra**:
+
+```{r, echo=TRUE, include=FALSE, warning=FALSE}
+
+check.packages <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+        install.packages(new.pkg, dependencies = TRUE)
+    sapply(pkg, require, character.only = TRUE)
+}
+packages<-c("ggplot2", "dplyr", "lmtest", "gdata", "car", "vegan", "gridExtra", "factoextra", "pca3d", "multcomp")
+check.packages(packages)
+
+
+data <- read.xls("Data_Cortex_Nuclear.xls", method='csv')
+```
+
+# 1. Описание датасета.
+
+В эксперименте участвовало 72 мыши: 34 с синдромом Дауна и 38 контрольных. На каждую мышь было проведено по 15 измерений уровня экспрессии белков. Каждое измерение белков имеет свой идентификатор, обозначаемый *MouseID* (всего `r length(data$MouseID)` различных измерений). 77 различных белков были задетектированы из ядерной фракции коры. Все мыши были поделены на 8 классов по трем признакам: генотип (*Genotype*: с синдромом Дауна -- *Ts65Dn*, без синдрома Дауна -- *Control*), лечение (*Treatment*: с лекарством, восстанавливающим способность к обучению -- *Memantine*, без лекарства -- *Saline*), поведение (*Behavior*: стимулированные к обучению -- *C/S*, без стимуляции -- *S/C*). Соответственно классы:
+
+c-CS-s: контрольные мыши, стимулированные к обучению, инъецированные физиологическим раствором (9 мышей)
+
+c-CS-m: контрольные мыши, стимулированные к обучению, инъецированные лекарством (10 мышей)
+
+c-SC-s: контрольные мыши, не стимулированные к обучению, инъецированные физиологическим раствором (9 мышей)
+
+c-SC-m: контрольные мыши, не стимулированные к обучению, инъецированные лекарством (10 мышей)
+
+t-CS-s: трисомные мыши, стимулированные к обучению, инъецированные физиологическим раствором (7 мышей)
+
+t-CS-m: трисомные мыши, стимулированные к обучению, инъецированные лекарством (9 мышей)
+
+t-SC-s: мыши с трисомией, не стимулированные к обучению, инъецированные физиологическим раствором (9 мышей)
+
+t-SC-m: трисомные мыши, не стимулированные к обучению, инъецированные лекарством (9 мышей)
+
+Для начала посмотрим на структуру данных:
+```{r}
+str(data)
+```
+
+Количество полных наблюдений: `r nrow(na.omit(data))`
+
+Можно заметить, что в датасете есть предикторы, в которых слишком много NA (это может быть связано с тем, что для некоторых образцов уровень экспрессии некоторых белков было сложно или невозможно померить, может быть закончились реактивы). Чтобы не удалять половину датасета, удалим сначала предикторы, обозначающие такие белки, уровень экспрессии которых не был измерен хотя бы для 50 образцов. 
+
+```{r}
+col.has.na <- apply(data, 2, function(x){(sum(is.na(x)) > 50)})
+# sum(col.has.na)
+data.filtered <- data[,!col.has.na]
+```
+Таким образом, мы удалили `r sum(col.has.na)` предикторов. В таком датасете количество полных наблюдений: `r nrow(na.omit(data.filtered))`. Остальные наблюдения с NA удалим (их мало, поэтому будем ими жертвовать во имя честного анализа). 
+
+```{r}
+data <- na.omit(data.filtered)
+```
+
+# 2. Есть ли различия в уровне продукции BDNF_N в зависимости от класса в эксперименте?
+
+## 2.1 Предварительный анализ
+
+Чтобы ответить на поставленный вопрос, мы проведем дисперсионный анализ. Но для начала попробуем посмотрим на следующий график зависимости экспрессии белка от класса образца.
+
+```{r, warning=FALSE}
+ggplot(data, aes(class, BDNF_N, color = class)) + stat_summary(fun.data = "mean_cl_normal") + ggtitle(label = "График зависимости экспрессии белка от класса образца")
+```
+
+Судя по графику, есть классы и их группы, для которых уровень экспрессии BDNF_N может значимо отличаться (особенно явно это видно для c-SC-m). Попробуем проверить это, проведя дисперсионный анализ.
+
+## 2.2. Дисперсионный анализ
+### 2.2.1. Проверка условий применимости
+
+Для того, чтобы воспользоваться функцией **anova** нам необходимо проверить, что соблюдаются некоторые условия.
+
+#### 2.2.1.1. Нормальное распределение остатков
+
+```{r}
+mod_bdnf <- lm(BDNF_N ~ class, data)
+qqPlot(mod_bdnf, id = FALSE, main = "Квантильный график остаков")
+```
+
+По графику видно, что это условие соблюдено.
+
+#### 2.2.1.2. Гомогенность дисперсий остатков
+
+```{r}
+mod_diag <- fortify(mod_bdnf)
+ggplot(mod_diag, aes(x = class, y = .stdresid)) + geom_boxplot() + ggtitle("График остатков от предсказанных значений")
+```
+
+В целом, разброс дисперсий в пределах нормы.
+
+#### 2.2.1.3. Отсутствие коллинеарности (независимость групп)
+
+По построению эксперимента, группы являются независимыми.
+
+#### 2.2.1.4. Случайность и независимость наблюдений в группах
+
+```{r}
+ggplot(mod_diag, aes(x = 1:nrow(mod_diag), y = .cooksd)) + 
+  geom_bar(stat = "identity") + 
+  ggtitle("График расстояний Кука") +
+  geom_hline(yintercept = 0.5, color = "red")
+```
+
+По графику видно, что влиятельных наблюдений у нас нет.
+
+### 2.2.2 ANOVA
+```{r}
+bdnf_anova <- Anova(mod_bdnf)
+bdnf_anova
+```
+
+Видим, что уровень экспрессии белка BDNF_N значимо зависит от класса образца (F =`r bdnf_anova[[3]][1]` , p_value = `r bdnf_anova[[4]][1]`, df_1 = `r bdnf_anova[[2]][1]`, df_2 = `r bdnf_anova[[2]][2]`).
+
+## 2.3. Пост-хок тест Тьюки
+
+Для выявления попарных различий проведем пост-хок тест Тьюки. 
+
+```{r, warning=FALSE}
+post_hoch <- glht(mod_bdnf, linfct = mcp(class = "Tukey"))
+result <- summary(post_hoch)
+result
+```
+
+Уровень экспрессии BDNF_N в классе c-CS-m значимо выше, чем в группе c-SC-m (F = `r result$coef[[3]]`, p_value = `r result$test$pvalues[2]` ), чем в классе c-SC-s (F = `r result$coef[[4]]`, p_value = `r result$test$pvalues[3]`), чем в классе t-CS-m (F = `r result$coef[[5]]`, p_value = `r result$test$pvalues[4]`), чем в классе t-CS-s (F = `r result$coef[[6]]`, p_value = `r result$test$pvalues[5]`), чем в классе t-SC-m (F = `r result$coef[[7]]`, p_value = `r result$test$pvalues[6]`).
+
+Но также есть значимые различия и для других пар. Все F и p-значения можно найти в таблице выше.
+
+```{r, echo=FALSE}
+#Также уровень экспрессии BDNF_N в классе c-CS-s значимо выше, чем в группе c-SC-m (F = `r result$coef[[9]]`, p_value = `r result$test$pvalues[8]` ), чем в классе c-SC-s (F = `r result$coef[[10]]`, p_value = `r result$test$pvalues[9]`), чем в классе t-CS-m (F = `r result$coef[[11]]`, p_value = `r result$test$pvalues[10]`), чем в классе t-CS-s (F = `r result$coef[[12]]`, p_value = `r result$test$pvalues[11]`), чем в классе t-SC-m (F = `r result$coef[[13]]`, p_value = `r result$test$pvalues[12]`).
+
+#Также уровень экспрессии BDNF_N в классе c-SС-m значимо ниже, чем в классе c-SC-s (F = `r result$coef[[15]]`, p_value = `r result$test$pvalues[14]`), чем в классе t-CS-m (F = `r result$coef[[16]]`, p_value = `r result$test$pvalues[15]`), чем в классе t-SC-m (F = `r result$coef[[18]]`, p_value = `r result$test$pvalues[17]`), чем в классе t-SC-s (F = `r result$coef[[19]]`, p_value = `r result$test$pvalues[18]`). 
+
+#Также уровень экспрессии BDNF_N в классе t-SC-s значимо выше, чем в классе - t-CS-s (F = `r result$coef[[28]]`, p_value = `r result$test$pvalues[27]`).
+```
+
+В полученной таблице много результатов, чтобы удобнее их анализировать, используем визуализацию.
+
+```{r}
+MyData <- data.frame(class = factor(levels(data$class), levels = levels(data$class)))
+MyData <- data.frame(MyData,
+  predict(mod_bdnf, newdata = MyData, interval = "confidence")
+)
+
+gg_bars <- ggplot(data = MyData, aes(x = class, y = fit)) +
+  geom_bar(stat = "identity", aes(fill = class), width = 0.5) +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.1)
+
+gg_bars + ggtitle(label = "График зависимости экспрессии BDNF_N от класса образца") + ylab(label = "Экспрессия BDNF_N")
+```
+
+
+# 3. Линейная модель для BDNF_N в зависимости от данных о других белках.
+## 3.1. Построение модели
+
+Построим полную модель зависимости уровня экспрессии белка BDNF_N от уровня экспрессии других белков.
+
+```{r}
+model_full <- lm(BDNF_N ~ . - MouseID - Genotype - Treatment - Behavior - class, data)
+summary(model_full)
+```
+
+Построенная модель хоть и имеет хорошую предсказательную способность (предсказывая 93% дисперсии с p-значением < 2.2e-16), но в ней есть множество белков, которые значимо не влияют на BDNF_N. Попробуем от них избавиться, построив новую модель, для начала убрав все незначимые предикторы (воспользуемся функцией **drop1**, чтобы их найти):
+
+```{r}
+drop1(model_full, test = "F")
+```
+
+
+```{r}
+model_bdnf <- lm(BDNF_N ~ ITSN1_N + pAKT_N + pBRAF_N + pJNK_N + PKCA_N + AKT_N + CAMKII_N + CREB_N + ELK_N + ERK_N + APP_N + RSK_N + TRKA_N + DSCR1_N + AMPKA_N + P70S6_N + ADARB1_N + S6_N + AcetylH3K9_N + Tau_N + IL1B_N + SHH_N + Ubiquitin_N + SNCA_N + pGSK3B_Tyr216_N, data)
+# drop1(model_bdnf, test = 'F') # здесь увидели, что белки ITSN1_N, pAKT_N, pGSK3B_Tyr216_N также являются незначимыми предикторами
+model_bdnf <- lm(BDNF_N ~ pBRAF_N + pJNK_N + PKCA_N + AKT_N + CAMKII_N + CREB_N + ELK_N + ERK_N + APP_N + RSK_N + TRKA_N + DSCR1_N + AMPKA_N + P70S6_N + ADARB1_N + S6_N + AcetylH3K9_N + Tau_N + IL1B_N + SHH_N + Ubiquitin_N + SNCA_N , data)
+```
+
+## 3.2. Оптимизация модели
+
+Попробуем ее еще прооптимизировать, используя функцию **vif()**, которая покажет, какие из предикторов являются коллинеарными к другим.
+
+```{r}
+vif(model_bdnf)
+```
+
+Уровень экспрессии белка TRKA_N коррелирует с другими предикторами, поэтому далее построим модель без ELK_N Далее аналогично избавимся от других коллинеарных предикторов.
+
+```{r}
+model_1 <- update(model_bdnf, .~. - ELK_N)
+vif(model_1)
+```
+
+```{r}
+model_2 <- update(model_1, .~. - ERK_N)
+vif(model_2)
+```
+
+
+```{r}
+model_3 <- update(model_2, .~. - CAMKII_N)
+vif(model_3)
+```
+
+```{r}
+model_4 <- update(model_3, .~. - pBRAF_N)
+vif(model_4)
+```
+
+```{r}
+model_5 <- update(model_4, .~. - TRKA_N)
+vif(model_5)
+```
+
+```{r}
+model_6 <- update(model_5, .~. - AMPKA_N)
+vif(model_6)
+```
+
+```{r}
+model_7 <- update(model_6, .~. - pJNK_N)
+vif(model_7)
+```
+
+```{r}
+model_8 <- update(model_7, .~. - Tau_N)
+vif(model_8)
+```
+
+```{r}
+model_9 <- update(model_8, .~. - CREB_N)
+vif(model_9)
+```
+
+```{r}
+model_10 <- update(model_9, .~. - SNCA_N)
+vif(model_10)
+```
+
+```{r}
+model_11 <- update(model_10, .~. - IL1B_N)
+vif(model_11)
+```
+
+```{r}
+model_12 <- update(model_11, .~. - RSK_N)
+vif(model_12)
+```
+
+```{r}
+model_13 <- update(model_12, .~. - APP_N)
+vif(model_13)
+```
+
+Больше не осталось предикторов с VIF > 2, но не удалили ли мы лишнее при отборе с помощью **vif**? Проверим, построив графики остатков.
+
+```{r}
+model_13_diag <- data.frame(fortify(model_13), data[])
+
+gg_resid <- ggplot(data = model_13_diag, aes(x = .fitted, y = .stdresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0) +
+  geom_smooth(method = "lm") +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+
+res_1 <- gg_resid + aes(x = TRKA_N)
+res_2 <- gg_resid + aes(x = ERK_N)
+res_3 <- gg_resid + aes(x = CAMKII_N)
+res_4 <- gg_resid + aes(x = pBRAF_N)
+res_5 <- gg_resid + aes(x = AMPKA_N)
+res_6 <- gg_resid + aes(x = SNCA_N)
+res_7 <- gg_resid + aes(x = APP_N)
+res_8 <- gg_resid + aes(x = CREB_N)
+res_9 <- gg_resid + aes(x = IL1B_N)
+res_10 <- gg_resid + aes(x = ELK_N)
+res_11 <- gg_resid + aes(x = pJNK_N)
+res_12 <- gg_resid + aes(x = Tau_N)
+res_13 <- gg_resid + aes(x = RSK_N)
+
+grid.arrange(res_1, res_2, res_3, res_4, res_5, res_6, res_7, res_8, res_9, res_10, res_11, res_12, res_13, nrow = 4)
+```
+
+Судя по этим графикам, нам стоит вернуть предикторы TRKA_N, ERK_N, CAMKII_N, pBRAF_N, AMPKA_N,  APP_N, CREB_N, ELK_N, RSK_N.
+
+```{r}
+model_14 <- update(model_13, .~. + TRKA_N + ERK_N + CAMKII_N + pBRAF_N + AMPKA_N + APP_N + CREB_N + ELK_N + RSK_N)
+# summary(model_14)
+```
+
+Далее будем снова отбирать предикторы по значимости при помощи F-теста и функции drop1.
+
+```{r}
+drop1(model_14, test = "F")
+```
+
+```{r}
+model_15 <- update(model_14, .~. - AcetylH3K9_N)
+summary(model_15)
+```
+
+Значение F-критерия ощутимо и значимо больше 1 (p < 2.2e-16). Это значит, что вероятность получить случайно такое значение связи между предсказываемой величиной и предикторами очень мала, а значит модель в целом должна хорошо описывать наши данные. Также важно посмотреть на скорректированный коэффициент детерминации, в случае полной модели он равен 0.9008, то есть это означает, что наша модель объясняет около 90% дисперсии предсказываемой переменной. 
+
+Итоговая модель: 
+**BDNF_N = -0.0009821 + 0.1717936 \* PKCA_N - 0.0401281 \* AKT_N - 0.0329473 \* DSCR1_N - 0.0139835 \* P70S6_N + 0.0090616 \* ADARB1_N - 0.0272513 \* S6_N + 0.1440914 \* SHH_N - 0.0343983 \* Ubiquitin_N + 0.0527734 \* TRKA_N + 0.0168152 \* ERK_N + 0.0639632 \* CAMKII_N + 0.0988123 \* pBRAF_N + 0.1642674 \* AMPKA_N + 0.0909022 \* APP_N + 0.2483058 \* CREB_N + 0.0403595 \* ELK_N + 0.1602744 \* RSK_N**.
+
+
+## 3.3. Диагностика модели
+
+Построим график расстояний Кука:
+
+```{r}
+mod_diag <- fortify(model_15)
+
+ggplot(mod_diag, aes(x = 1:nrow(mod_diag), y = .cooksd)) + 
+  geom_bar(stat = "identity") + 
+  geom_hline(yintercept = 2, color = "red")
+```
+
+Как видим, влиятельных наблюдений нет. Построим график остатков в зависимости от предсказанных значений:
+
+```{r}
+gg_full <- ggplot(data = mod_diag, aes(x = .fitted, y = .stdresid)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0) +
+  geom_smooth(method = "lm") +
+  geom_hline(yintercept = 2, color = "red") +
+  geom_hline(yintercept = -2, color = "red")
+gg_full
+```
+
+По графику остатков мы можем сделать вывод, что наша модель является гетероскедастичной. Также в целом не видно явной нелинейности. Есть некоторое количество наблюдений, выходящих за пределы двух стандартных отклонений. Несмотря на это, такие наблюдения немногочисленны, поэтому построенная модель все еще имеет все шансы иметь хорошую предсказательную способность (возможно, стоит посмотреть каждый выброс и проанализировать, был ли он получен из-за характеристик зависимости, или же они являются результатами ошибки экспериментатора/оборудования).
+
+Осталась только проверка на нормальность:
+
+```{r}
+qqPlot(mod_diag$.fitted)
+```
+
+Несмотря на то, что правый хвост "вываливается", распределение не ушло далеко от нормального.
+
+## 3.4. Вывод
+
+В целом, наша модель не улучшилась по сравнению с полной по показателю коэффициента детерминации, но зато критерий F-статистики вырос, а самое главное, анализировать такую модель стало гораздо проще: предикторы практически не коррелируют, а также нет незначимых предикторов.
+
+Наибольший коэффициент в модели стоит перед CREB_N, поэтому визуализируем зависимость уровня экспрессии BDNF_N от уровня экспрессии CREB_N.
+
+```{r}
+ggplot(data, aes(x = CREB_N, y = BDNF_N)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") 
+```
+
+
+# 4. PCA
+## 4.1. Ординация
+
+Анализ главных компонент позволяет проследить, какие из предикторов вносят бОльший вклад в модель в смысле процента предсказываемой дисперсии. Для того, чтобы его выполнить, воспользуемся функцией **rda** для подмножества датасета белков.
+
+```{r}
+data_select <- data[2:72]
+data_pca <- rda(data_select[, ], scale = TRUE)
+head(summary(data_pca))
+```
+
+В summury можно найти графу *Importance of components* в которой для каждой компоненты указано ее собственное число, доля, которую она объясняет (умножив на 100, получим процент), а также общий вклад. 
+
+## 4.2. График факторных нагрузок
+
+Результат анализа довольно массивный, попробуем его визуализировать. Для этого построим график факторных нагрузок:
+
+```{r}
+biplot(data_pca, scaling = "species", display = "species")
+```
+
+Отразим кластеры образцов в соответствии с поведением (**Behavior**) на осях главных компонент. Как видно, они отлично разделяются на таком графике.
+
+```{r}
+data_pca_base<- prcomp(data_select[, -1], scale = TRUE)
+fviz_pca_ind(data_pca_base,
+             geom.ind = "point", # show points only (nbut not "text")
+             col.ind = data$Behavior, # color by groups
+             palette = "Dark2",
+             addEllipses = TRUE, # Concentration ellipses
+             legend.title = "Behavior"
+)
+```
+
+## 4.3. График первых трех компонент
+
+```{r, warning=FALSE}
+gr <- factor(data[ ,76])
+pca3d(data_pca_base, group=gr, legend="topleft")
+snapshotPCA3d(file="pca.png")
+```
+
+![pca.png](pca.png)
+
